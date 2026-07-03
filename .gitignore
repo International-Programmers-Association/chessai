@@ -1,0 +1,12 @@
+dist/
+build/
+*.spec
+venv/
+pkg/
+dataset/
+datasetgw/
+__pycache__/
+*.pyc
+.DS_Store
+/ChessAI.exe
+engines/stockfish.exe
