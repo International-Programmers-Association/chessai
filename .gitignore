@@ -1,0 +1,13 @@
+data/
+dataset/
+__pycache__/
+*.pyc
+venv/
+pkg_torch_cuda/
+train_err.txt
+train_log.txt
+train_out.txt
+engines/
+main_qt.py
+chessai/qt_app.py
+chessai/qt_board_widget.py
