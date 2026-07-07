@@ -12,6 +12,8 @@ import chess.engine
 
 DEFAULT_ENGINE_PATH = (Path(sys._MEIPASS) / "engines" / "stockfish.exe" if getattr(sys, 'frozen', False)
                         else Path(__file__).resolve().parent.parent / "engines" / "stockfish.exe")
+DEFAULT_NODE_PATH = r"D:\NodeJS\node.exe"
+TORCH_WRAPPER_PATH = Path(__file__).resolve().parent.parent / "torch" / "js" / "torch_wrapper.js"
 
 
 @dataclass
@@ -148,13 +150,14 @@ class StockfishEngine:
         *,
         time_limit: float = 1.0,
         depth: Optional[int] = None,
+        nodes: Optional[int] = None,
         multipv: int = 3,
     ) -> AnalysisResult:
         eng = self._engine
         if eng is None:
             raise RuntimeError("Engine is not started")
 
-        limit = chess.engine.Limit(time=time_limit, depth=depth)
+        limit = chess.engine.Limit(time=time_limit, depth=depth, nodes=nodes)
         with self._busy:
             try:
                 infos = eng.analyse(board, limit, multipv=multipv, info=chess.engine.INFO_ALL)
@@ -184,6 +187,7 @@ class StockfishEngine:
         *,
         time_limit: float = 0.5,
         depth: Optional[int] = None,
+        nodes: Optional[int] = None,
         multipv: int = 3,
         poll_interval: float = 0.15,
     ) -> None:
@@ -197,7 +201,7 @@ class StockfishEngine:
                     self._current_fen = fen
                 try:
                     result = self.analyze_position(
-                        board, time_limit=time_limit, depth=depth, multipv=multipv
+                        board, time_limit=time_limit, depth=depth, nodes=nodes, multipv=multipv
                     )
                     if not self._stop_event.is_set() and get_board().fen() == result.fen:
                         on_update(result)
@@ -209,3 +213,38 @@ class StockfishEngine:
         self._stop_event.clear()
         self._analysis_thread = threading.Thread(target=worker, daemon=True)
         self._analysis_thread.start()
+
+
+class TorchEngine(StockfishEngine):
+    def __init__(
+        self,
+        node_path: Path | str = DEFAULT_NODE_PATH,
+        threads: Optional[int] = None,
+        hash_mb: int = 16,
+    ) -> None:
+        self.node_path = Path(node_path)
+        self._torch_wrapper = TORCH_WRAPPER_PATH
+        self.engine_path = self._torch_wrapper
+        self.threads = 1
+        self.hash_mb = min(hash_mb, 128)
+        self._engine: Optional[chess.engine.SimpleEngine] = None
+        self._busy = threading.Lock()
+        self._analysis_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._current_fen: Optional[str] = None
+
+    def _popen(self) -> chess.engine.SimpleEngine:
+        eng = chess.engine.SimpleEngine.popen_uci([str(self.node_path), str(self._torch_wrapper)])
+        eng.configure({"Threads": self.threads, "Hash": self.hash_mb})
+        return eng
+
+    def set_hash(self, mb: int) -> None:
+        super().set_hash(min(mb, 128))
+
+    def set_threads(self, n: int) -> None:
+        super().set_threads(n)
+
+    def set_node_path(self, path: Path | str) -> None:
+        self.node_path = Path(path)
+        self.stop()
+        self.start()

@@ -11,3 +11,5 @@ engines/
 main_qt.py
 chessai/qt_app.py
 chessai/qt_board_widget.py
+torch/torch-4.wasm
+/test_torch*.js

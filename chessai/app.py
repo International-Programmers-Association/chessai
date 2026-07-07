@@ -14,7 +14,7 @@ import chess
 import cv2
 
 from chessai.board_widget import BoardWidget, MoveArrow, MY_ARROW, OPP_ARROW, ARROW_MY_COLOR, ARROW_OPP_COLOR, _color
-from chessai.engine import AnalysisResult, StockfishEngine
+from chessai.engine import AnalysisResult, StockfishEngine, TorchEngine, DEFAULT_NODE_PATH
 from chessai.fast_matcher import match_backend_name
 from chessai.screen_reader import BoardRegion, ScreenBoardReader, ScreenReadResult, select_screen_region
 from chessai.win32_automation import install_hotkey, uninstall_hotkey
@@ -65,11 +65,14 @@ class ChessAIApp:
         self._pending_auto_move = False
         self._auto_play_hwnd: Optional[int] = None
         self._fen_history: list[str] = []
+        self._engine_node_limit = 0
 
         self._load_config()
         self._save_config()
 
         self._build_ui()
+        if hasattr(self, "_engine_label"):
+            self._engine_label.configure(text="Torch" if self._engine_type == "torch" else "Stockfish")
         self._sync_turn_mode()
         self._set_always_on_top(True)
         self._start_engine()
@@ -381,6 +384,15 @@ class ChessAIApp:
             font=("Segoe UI", 8),
         ).pack(anchor=tk.W, padx=8, pady=(0, 2))
 
+        self._engine_label = tk.Label(
+            right_inner,
+            text="Stockfish",
+            bg=COLORS["panel"],
+            fg=COLORS["accent"],
+            font=("Segoe UI", 8, "bold"),
+        )
+        self._engine_label.pack(anchor=tk.W, padx=8, pady=(0, 2))
+
         self.screen_status_var = tk.StringVar(value="Screen: inactive")
         tk.Label(
             right_inner,
@@ -434,6 +446,19 @@ class ChessAIApp:
         d_spin = ttk.Spinbox(row_depth, from_=0, to=30, textvariable=self.depth_var, width=4)
         d_spin.pack(side=tk.LEFT, padx=4)
         tk.Label(row_depth, text="(0 = no limit)", bg=COLORS["panel"], fg=COLORS["muted"],
+                 font=("Segoe UI", 7)).pack(side=tk.LEFT)
+
+        row_nodes = tk.Frame(settings, bg=COLORS["panel"])
+        row_nodes.pack(fill=tk.X, padx=6, pady=3)
+        tk.Label(row_nodes, text="Nodes", bg=COLORS["panel"], fg=COLORS["text"],
+                 font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        self._node_limit_var = tk.IntVar(value=getattr(self, "_engine_node_limit", 0))
+        n_spin = ttk.Spinbox(row_nodes, from_=0, to=999999999, increment=1000,
+                              textvariable=self._node_limit_var, width=8)
+        n_spin.pack(side=tk.LEFT, padx=4)
+        n_spin.bind("<<Increment>>", self._on_engine_config_change)
+        n_spin.bind("<<Decrement>>", self._on_engine_config_change)
+        tk.Label(row_nodes, text="(0 = no limit)", bg=COLORS["panel"], fg=COLORS["muted"],
                  font=("Segoe UI", 7)).pack(side=tk.LEFT)
 
         row2 = tk.Frame(settings, bg=COLORS["panel"])
@@ -500,6 +525,7 @@ class ChessAIApp:
         ).pack(side=tk.LEFT)
 
         self._add_model_engine_selectors(settings)
+        self._toggle_engine_ui()
 
         self.collect_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -647,6 +673,7 @@ class ChessAIApp:
 
         self._engine_threads = cfg.get("engine_threads", os.cpu_count() or 4)
         self._engine_hash = cfg.get("engine_hash", 512)
+        self._engine_node_limit = cfg.get("engine_node_limit", 0)
 
         dev = cfg.get("device", "auto")
         self._device_choice = dev
@@ -656,6 +683,9 @@ class ChessAIApp:
         self._hotkey_mod = cfg.get("hotkey_mod", 3)  # MOD_CONTROL | MOD_ALT
         self._hotkey_vk = cfg.get("hotkey_vk", 0x53)  # VK_S
         self._hotkey_hint = self._format_hotkey(self._hotkey_mod, self._hotkey_vk)
+
+        self._engine_type = cfg.get("engine_type", "stockfish")
+        self._node_path = cfg.get("node_path", DEFAULT_NODE_PATH)
 
     def _save_config(self) -> None:
         import json
@@ -675,8 +705,11 @@ class ChessAIApp:
             "torch_dir": getattr(self, "_torch_dir", ""),
             "engine_threads": getattr(self, "_engine_threads", os.cpu_count() or 4),
             "engine_hash": getattr(self, "_engine_hash", 512),
+            "engine_node_limit": getattr(self, "_engine_node_limit", 0),
             "hotkey_mod": getattr(self, "_hotkey_mod", 3),
             "hotkey_vk": getattr(self, "_hotkey_vk", 0x53),
+            "engine_type": getattr(self, "_engine_type", "stockfish"),
+            "node_path": getattr(self, "_node_path", DEFAULT_NODE_PATH),
         }
         try:
             with open(cfg_path, "w") as f:
@@ -916,8 +949,30 @@ class ChessAIApp:
         self._engine_combo.bind("<<ComboboxSelected>>", self._on_engine_change)
         self._refresh_engine_combo()
 
+        # --- Engine type (Stockfish / Torch) ---
+        row_type = tk.Frame(parent, bg=COLORS["panel"])
+        row_type.pack(fill=tk.X, padx=6, pady=(2, 0))
+        tk.Label(row_type, text="Engine", bg=COLORS["panel"], fg=COLORS["text"],
+                 font=("Segoe UI", 7)).pack(side=tk.LEFT)
+        self._engine_type_var = tk.StringVar(value=getattr(self, "_engine_type", "stockfish"))
+        self._engine_type_combo = ttk.Combobox(row_type, textvariable=self._engine_type_var,
+                                                values=("stockfish", "torch"), state="readonly", width=10)
+        self._engine_type_combo.pack(side=tk.LEFT, padx=4)
+        self._engine_type_combo.bind("<<ComboboxSelected>>", self._on_engine_type_change)
+
+        self._node_path_var = tk.StringVar(value=getattr(self, "_node_path", DEFAULT_NODE_PATH))
+        self._node_row = tk.Frame(parent, bg=COLORS["panel"])
+        tk.Label(self._node_row, text="Node.js", bg=COLORS["panel"], fg=COLORS["text"],
+                 font=("Segoe UI", 7)).pack(side=tk.LEFT)
+        e_node = tk.Entry(self._node_row, textvariable=self._node_path_var, bg="#333", fg=COLORS["text"],
+                          relief=tk.FLAT, font=("Segoe UI", 7))
+        e_node.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 2))
+        tk.Button(self._node_row, text="Browse", command=self._pick_node_path,
+                  bg="#3a3a3a", fg=COLORS["text"], relief=tk.FLAT, padx=4, font=("Segoe UI", 7)).pack(side=tk.RIGHT)
+
         # --- Piece style folder ---
-        row_p = tk.Frame(parent, bg=COLORS["panel"])
+        self._piece_row = tk.Frame(parent, bg=COLORS["panel"])
+        row_p = self._piece_row
         row_p.pack(fill=tk.X, padx=6, pady=(2, 0))
         tk.Label(row_p, text="Pieces", bg=COLORS["panel"], fg=COLORS["text"],
                  font=("Segoe UI", 7)).pack(side=tk.LEFT)
@@ -1040,6 +1095,26 @@ class ChessAIApp:
     def _on_engine_change(self, event=None) -> None:
         self._apply_engine(self._engine_file_var.get())
 
+    def _on_engine_type_change(self, event=None) -> None:
+        self._engine_type = self._engine_type_var.get()
+        self._engine_label.configure(text="Torch" if self._engine_type == "torch" else "Stockfish")
+        self._save_config()
+        self.engine.stop()
+        self._start_engine()
+        self._toggle_engine_ui()
+
+    def _toggle_engine_ui(self) -> None:
+        is_torch = self._engine_type_var.get() == "torch"
+        state = "normal" if is_torch else "disabled"
+        for child in self._node_row.winfo_children():
+            if isinstance(child, (tk.Entry, tk.Button)):
+                child.configure(state=state)
+        self._node_row.pack_forget()
+        if is_torch:
+            self._node_row.pack(fill=tk.X, padx=6, pady=(0, 1), before=self._piece_row)
+        else:
+            self._node_row.pack_forget()
+
     def _on_device_change(self, event=None) -> None:
         from chessai import classifier as clf
         choice = self._device_var.get()
@@ -1052,12 +1127,36 @@ class ChessAIApp:
         self.status_var.set(f"Device: {choice}")
 
     def _on_engine_config_change(self, event=None) -> None:
-        self._engine_threads = self._threads_var.get()
-        self._engine_hash = self._hash_var.get()
+        try:
+            self._engine_threads = self._threads_var.get()
+        except (ValueError, tk.TclError):
+            self._engine_threads = getattr(self, "_engine_threads", os.cpu_count() or 4)
+            self._threads_var.set(self._engine_threads)
+        try:
+            self._engine_hash = self._hash_var.get()
+        except (ValueError, tk.TclError):
+            self._engine_hash = getattr(self, "_engine_hash", 512)
+            self._hash_var.set(self._engine_hash)
+        if self._engine_type == "torch":
+            self._engine_hash = min(self._engine_hash, 128)
+            self._engine_threads = 1
+            self._hash_var.set(self._engine_hash)
+            self._threads_var.set(1)
         self.engine.set_threads(self._engine_threads)
         self.engine.set_hash(self._engine_hash)
+        try:
+            self._engine_node_limit = self._node_limit_var.get()
+        except (ValueError, tk.TclError):
+            self._engine_node_limit = getattr(self, "_engine_node_limit", 0)
+            self._node_limit_var.set(self._engine_node_limit)
         self._save_config()
-        self.status_var.set(f"Stockfish: {self._engine_threads} threads, {self._engine_hash} MB Hash")
+        nl = f" {self._engine_node_limit}N" if self._engine_node_limit else ""
+        if self._engine_type == "torch":
+            self._engine_label.configure(text="Torch")
+            self.status_var.set(f"Torch: {self._engine_threads} threads, {self._engine_hash} MB Hash{nl}")
+        else:
+            self._engine_label.configure(text="Stockfish")
+            self.status_var.set(f"Stockfish: {self._engine_threads} threads, {self._engine_hash} MB Hash{nl}")
 
     def _pick_model_dir(self) -> None:
         d = tk.filedialog.askdirectory(title="Models folder (.pt)", initialdir=self._model_dir_var.get())
@@ -1090,6 +1189,16 @@ class ChessAIApp:
         self.board_widget._load_piece_images(self.board_widget.square_size)
         self.board_widget._draw()
         self._save_config()
+
+    def _pick_node_path(self) -> None:
+        d = tk.filedialog.askopenfilename(title="Node.js executable", initialdir=self._node_path_var.get() or r"D:\NodeJS")
+        if not d:
+            return
+        self._node_path_var.set(d)
+        self._node_path = d
+        self._save_config()
+        self.engine.stop()
+        self._start_engine()
 
     def _set_always_on_top(self, enabled: bool) -> None:
         self.pinned_var.set(enabled)
@@ -1225,17 +1334,32 @@ class ChessAIApp:
     def _start_engine(self) -> None:
         if not self.engine.is_running:
             try:
-                if Path(self.engine.engine_path).is_file():
+                if self._engine_type == "torch":
+                    if not Path(self._node_path).is_file():
+                        self.status_var.set(f"Node.js not found: {self._node_path}")
+                        return
+                    self.engine = TorchEngine(node_path=self._node_path)
                     self.engine.start()
-                    self.engine.set_threads(self._threads_var.get())
-                    self.engine.set_hash(self._hash_var.get())
-                    backend = match_backend_name()
-                    backend_label = {"cuda": "GPU CUDA", "opencl": "GPU OpenCL", "cpu": "CPU"}.get(
-                        backend, backend
-                    )
-                    self.status_var.set(f"Stockfish ready | vision: {backend_label}")
+                    safe_hash = min(self._hash_var.get(), 128)
+                    self.engine.set_threads(1)
+                    self.engine.set_hash(safe_hash)
+                    self._threads_var.set(1)
+                    self._hash_var.set(safe_hash)
+                    self._engine_label.configure(text="Torch")
+                    self.status_var.set("Torch ready")
                 else:
-                    self.status_var.set("Engine not selected — specify folder in settings")
+                    if Path(self.engine.engine_path).is_file():
+                        self.engine.start()
+                        self.engine.set_threads(self._threads_var.get())
+                        self.engine.set_hash(self._hash_var.get())
+                        self._engine_label.configure(text="Stockfish")
+                        backend = match_backend_name()
+                        backend_label = {"cuda": "GPU CUDA", "opencl": "GPU OpenCL", "cpu": "CPU"}.get(
+                            backend, backend
+                        )
+                        self.status_var.set(f"Stockfish ready | vision: {backend_label}")
+                    else:
+                        self.status_var.set("Engine not selected — specify folder in settings")
             except FileNotFoundError as exc:
                 self.status_var.set(str(exc))
 
@@ -1444,11 +1568,13 @@ class ChessAIApp:
             self.analysis_queue.put((self._analysis_token, result))
 
         dv = self.depth_var.get()
+        nv = self._node_limit_var.get()
         self.engine.start_continuous_analysis(
             get_board=lambda: self.board,
             on_update=on_update,
             time_limit=float(self.time_var.get()),
             depth=dv if dv > 0 else None,
+            nodes=nv if nv > 0 else None,
             multipv=int(self.multipv_var.get()),
             poll_interval=0.2,
         )
@@ -1463,6 +1589,8 @@ class ChessAIApp:
         time_limit = float(self.time_var.get())
         dv = self.depth_var.get()
         depth = dv if dv > 0 else None
+        nv = self._node_limit_var.get()
+        nodes = nv if nv > 0 else None
         try:
             multipv = int(self.multipv_var.get())
         except (ValueError, tk.TclError):
@@ -1474,7 +1602,7 @@ class ChessAIApp:
         def worker() -> None:
             try:
                 result = self.engine.analyze_position(
-                    board_copy, time_limit=time_limit, depth=depth, multipv=multipv
+                    board_copy, time_limit=time_limit, depth=depth, nodes=nodes, multipv=multipv
                 )
                 result.finished = True
                 self.analysis_queue.put((token, result))
